@@ -54,3 +54,17 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Documentación interna (alcance de producto, negocio, roadmap, bitácora)
+MVP_SPEC.md
+HISTORIAL.md
+AGENTS.md
+CLAUDE.md
+
+# Reglas y contexto local del IDE (referencian docs internos)
+.cursor/
+
+# Prisma — cliente generado
+/generated
+
+/generated/prisma
