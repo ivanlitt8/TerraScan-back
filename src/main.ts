@@ -26,6 +26,14 @@ async function bootstrap() {
     origin: frontendOrigin,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
+    // Headers HTTP custom que el browser debe **permitir leer** desde el
+    // cliente JS cross-origin. Sin esta whitelist, `response.headers.get(...)`
+    // devuelve `null` aunque el server los esté enviando: la spec de CORS
+    // oculta por default cualquier header que no esté en el set "simple".
+    //
+    // - `X-NDVI-Bbox`: bbox usado para enmarcar la imagen NDVI; el frontend
+    //   lo lee desde `useNDVILayer` para posicionar el `image` source.
+    exposedHeaders: ['X-NDVI-Bbox'],
   });
 
   app.enableShutdownHooks();

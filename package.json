@@ -17,14 +17,17 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "verify:sentinel": "ts-node -r tsconfig-paths/register src/scripts/verify-sentinel.ts"
   },
   "dependencies": {
+    "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
     "@prisma/client": "^6.19.3",
     "@turf/turf": "^7.3.5",
+    "axios": "^1.16.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.2",
     "jose": "^6.2.3",
