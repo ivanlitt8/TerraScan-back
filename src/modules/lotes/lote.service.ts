@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   SentinelService,
   type Bbox,
+  type NDVIStatisticsPoint,
   type TimeRange,
 } from '../sentinel/sentinel.service';
 import { AnalyzeLoteDto } from './dto/analyze-lote.dto';
@@ -32,6 +33,64 @@ const DEFAULT_SALUD_WINDOW_DAYS = 30;
 export interface SaludNDVIResult {
   buffer: Buffer;
   bbox: Bbox;
+}
+
+/**
+ * Categoría textual del `healthScore` para mostrar como label en el panel.
+ * Los cortes coinciden con los que el frontend ya usa para el color
+ * (`getScoreTheme` en `DashboardLote`), así backend y UI hablan el mismo
+ * idioma sin tener que sincronizar números mágicos.
+ */
+export type HealthScoreCategoria = 'Alta' | 'Moderada' | 'Baja' | 'Sin datos';
+
+/**
+ * Resumen del estado de salud del lote para el momento más reciente con
+ * datos disponibles. Se calcula a partir de la serie estadística completa
+ * (`stats`) pero expone sólo las métricas que la UI necesita para pintar
+ * el bloque "Score de salud histórica" sin tener que recorrer el array.
+ */
+export interface HealthScoreSummary {
+  /**
+   * 0–100. Porcentaje del área medible del lote con NDVI por encima del
+   * umbral de salud. Tomado del último intervalo válido de la serie
+   * (el "ahora" del lote según Sentinel).
+   */
+  score: number;
+  /** Etiqueta agronómica derivada de `score`. */
+  categoria: HealthScoreCategoria;
+  /** Hectáreas calculadas con Turf sobre el polígono del lote. */
+  totalHectareas: number;
+  /**
+   * NDVI medio del lote en el intervalo de referencia. Contexto numérico
+   * que complementa al score (el score es "qué porción está sana", el
+   * NDVI medio es "qué tan sana en promedio").
+   */
+  ndviPromedio: number | null;
+  /**
+   * Píxeles válidos del último intervalo (`sampleCount - noDataCount`).
+   * Si es muy bajo respecto al `sampleCount` total, hay mucha nube/sombra
+   * y el score debe interpretarse con cautela; el frontend lo puede usar
+   * para mostrar un disclaimer.
+   */
+  validPixels: number;
+  /**
+   * Fecha del intervalo de referencia (`YYYY-MM-DD`). `null` si no hubo
+   * ningún intervalo válido (cobertura total de nubes, fechas sin tile, etc.).
+   */
+  fechaReferencia: string | null;
+}
+
+/**
+ * Resultado del endpoint compuesto `GET /api/lotes/:id/salud-analisis`:
+ * agrupa el PNG NDVI (visual), la serie temporal estadística (numérica)
+ * y el resumen de score (agronómico) de Sentinel Hub para que el dashboard
+ * pueda pintarse en una sola request.
+ */
+export interface SaludAnalisisResult {
+  buffer: Buffer;
+  bbox: Bbox;
+  stats: NDVIStatisticsPoint[];
+  healthScore: HealthScoreSummary;
 }
 
 @Injectable()
@@ -145,6 +204,132 @@ export class LoteService {
     );
 
     return { buffer, bbox };
+  }
+
+  /**
+   * Versión "compuesta" que devuelve PNG **y** serie estadística en una
+   * sola operación. Pensado para el endpoint `GET /:id/salud-analisis`
+   * que el frontend usa al abrir el dashboard del lote: con una sola
+   * roundtrip al backend (y dos en paralelo a Sentinel) ya tenemos todo
+   * lo necesario para el overlay y el gráfico de evolución NDVI.
+   *
+   * Decisiones:
+   *  - `Promise.all` (no `allSettled`): si una de las dos falla preferimos
+   *    devolver error al cliente y que reintente, antes que mostrar un
+   *    dashboard parcial donde el usuario no sabe si lo que ve es real o
+   *    es una respuesta degradada. Sentinel Hub es estable; las fallas
+   *    suelen ser transitorias (rate limits, escenas con 100% nubes) y un
+   *    reintento manual resuelve el caso.
+   *  - Misma `geometry` para ambas llamadas (clipping y stats sobre el
+   *    polígono real del lote, no sobre el envelope). Eso es lo que pide
+   *    explícitamente el caller: "que las estadísticas correspondan
+   *    exactamente a mi lote".
+   *  - Mismo `timeRange` para ambas: la imagen muestra la última escena
+   *    válida del período y las stats lo agrupan por intervalos de `P10D`,
+   *    así el usuario ve la foto y debajo el contexto temporal.
+   */
+  async getSaludAnalisis(
+    id: string,
+    userId: string,
+    query: GetSaludQueryDto,
+  ): Promise<SaludAnalisisResult> {
+    const lote = await this.findOneForUser(id, userId);
+
+    const feature = lote.poligonoGeoJSON as unknown as Feature<Polygon>;
+    const bbox = this.calcularBbox(feature);
+    const timeRange = this.resolveTimeRange(query);
+    const totalHectareas = this.calcularAreaHectareas(feature);
+
+    this.logger.log(
+      `Solicitando análisis NDVI completo para lote ${lote.id} (usuario ${userId}) ` +
+        `bbox=${bbox.join(',')} range=${timeRange.from}..${timeRange.to} ` +
+        `area=${totalHectareas}ha`,
+    );
+
+    const [buffer, stats] = await Promise.all([
+      this.sentinel.getNDVI(bbox, timeRange, {}, feature.geometry),
+      this.sentinel.getNDVIStatistics(feature.geometry, timeRange),
+    ]);
+
+    const healthScore = this.summarizeHealthScore(stats, totalHectareas);
+
+    this.logger.log(
+      `Análisis NDVI lote ${lote.id} OK: PNG ${buffer.byteLength} bytes, ` +
+        `${stats.length} puntos, score=${healthScore.score} (${healthScore.categoria})`,
+    );
+
+    return { buffer, bbox, stats, healthScore };
+  }
+
+  /**
+   * Calcula el resumen de salud del lote a partir de la serie temporal.
+   *
+   * Regla de "score actual":
+   *  - Tomamos el **último intervalo válido** de la serie como referencia
+   *    del estado actual. Es lo más útil agronómicamente: representa lo
+   *    que el productor ve hoy en el campo, no un promedio que diluye
+   *    eventos recientes (caída por sequía, recuperación post-lluvia, etc.).
+   *  - Si la serie está vacía (Sentinel no encontró escenas válidas en
+   *    el rango temporal) devolvemos `score: 0`, `categoria: "Sin datos"`
+   *    y `fechaReferencia: null` para que el frontend pueda mostrar un
+   *    placeholder honesto en vez de un número inventado.
+   *
+   * Por qué no `Math.max(stats.map(s => s.healthScore))` o el promedio
+   * de la serie: ambos enmascararían deterioros recientes con valores
+   * históricos altos. La opción "último intervalo" es la única que
+   * refleja el estado "ahora" del lote.
+   *
+   * Las `totalHectareas` vienen del cálculo geométrico con Turf
+   * (`calcularAreaHectareas`); independientes de Sentinel, así que valen
+   * incluso cuando la serie está vacía.
+   */
+  private summarizeHealthScore(
+    stats: NDVIStatisticsPoint[],
+    totalHectareas: number,
+  ): HealthScoreSummary {
+    if (stats.length === 0) {
+      return {
+        score: 0,
+        categoria: 'Sin datos',
+        totalHectareas,
+        ndviPromedio: null,
+        validPixels: 0,
+        fechaReferencia: null,
+      };
+    }
+
+    // `stats` viene de `mapStatisticsResponse` que preserva el orden de
+    // Sentinel (cronológico ascendente). Tomamos el último como "ahora".
+    // Defensivamente ordenamos por fecha antes de elegir el último, así
+    // somos robustos si algún día Sentinel cambia el orden de salida.
+    const ordered = [...stats].sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const latest = ordered[ordered.length - 1];
+
+    return {
+      score: latest.healthScore,
+      categoria: this.healthCategoria(latest.healthScore),
+      totalHectareas,
+      ndviPromedio: latest.ndvi,
+      validPixels: latest.validPixels,
+      fechaReferencia: latest.fecha,
+    };
+  }
+
+  /**
+   * Mapeo de score numérico a etiqueta agronómica.
+   *
+   * Cortes:
+   *  - `>= 70` → "Alta" (lote sano, sin acciones urgentes).
+   *  - `>= 40` → "Moderada" (zonas en estrés, conviene inspección).
+   *  - `<  40` → "Baja" (mayor parte del lote en estrés, acción inmediata).
+   *
+   * Coinciden con los thresholds visuales del frontend (`getScoreTheme`
+   * en `DashboardLote`). Si se cambian acá, sincronizar allá.
+   */
+  private healthCategoria(score: number): HealthScoreCategoria {
+    if (score >= 70) return 'Alta';
+    if (score >= 40) return 'Moderada';
+    return 'Baja';
   }
 
   private calcularAreaHectareas(poligono: unknown): number {

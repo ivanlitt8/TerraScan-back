@@ -101,4 +101,56 @@ export class LoteController {
       disposition: `inline; filename="lote-${id}-ndvi.png"`,
     });
   }
+
+  /**
+   * Endpoint compuesto: ejecuta `getNDVI` (PNG visual) y `getNDVIStatistics`
+   * (serie temporal por intervalo) en paralelo y devuelve **un único JSON**
+   * para que el frontend pueda dibujar el overlay, el gráfico de evolución
+   * NDVI y el score de salud en una sola roundtrip.
+   *
+   * Forma del payload:
+   * ```ts
+   * {
+   *   imageBase64: string;   // PNG en base64 (sin prefijo `data:`)
+   *   imageMime:   "image/png";
+   *   bbox:        [minLng, minLat, maxLng, maxLat];
+   *   stats:       Array<{ fecha, ndvi, healthScore, validPixels }>;
+   *   healthScore: {
+   *     score:            number;   // 0–100, último intervalo válido
+   *     categoria:        "Alta" | "Moderada" | "Baja" | "Sin datos";
+   *     totalHectareas:   number;   // área geométrica del lote
+   *     ndviPromedio:     number | null;
+   *     validPixels:      number;
+   *     fechaReferencia:  string | null;
+   *   };
+   * }
+   * ```
+   *
+   * Por qué base64 y no `StreamableFile`:
+   *  - Un solo body permite atomicidad (o llega todo o nada) y deja un
+   *    contrato JSON serializable para mocks/tests.
+   *  - El overhead de base64 (~33%) es despreciable para PNGs de 512×512
+   *    que pesan ~30–80 KB.
+   *  - El frontend convierte el base64 a `Blob` y crea su `ObjectURL`
+   *    igual que cuando consume `getSalud` directo — la API de MapLibre no
+   *    cambia, solo cambia la fuente del Blob.
+   */
+  @Get(':id/salud-analisis')
+  @Header('Cache-Control', 'private, max-age=300')
+  async getSaludAnalisis(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Query() query: GetSaludQueryDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    const { buffer, bbox, stats, healthScore } =
+      await this.loteService.getSaludAnalisis(id, userId, query);
+
+    return {
+      imageBase64: buffer.toString('base64'),
+      imageMime: 'image/png',
+      bbox,
+      stats,
+      healthScore,
+    };
+  }
 }

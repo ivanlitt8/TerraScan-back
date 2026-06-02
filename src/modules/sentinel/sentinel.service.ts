@@ -46,14 +46,19 @@ export interface GetNdviOptions {
 
 /**
  * Evalscript NDVI sobre Sentinel-2 (B04 = Rojo, B08 = NIR) con paleta
- * semáforo. Se devuelve en RGB ya pintado para que el frontend pueda
+ * semáforo. Se devuelve en RGBA ya pintado para que el frontend pueda
  * overlayearlo directo sobre el mapa sin recolorear.
  *
- * Para una versión cruda (NDVI float por píxel, sin paleta) habría que
- * cambiar `output.bands` a 1 y emitir `[ndvi]`; útil si en el futuro se
- * quiere clasificar en cliente. Hoy preferimos pintar en server.
+ * Para una versión cruda (NDVI float por píxel, sin paleta) ver
+ * `NDVI_STATISTICS_EVALSCRIPT` — ese es el que usa `/statistics` para
+ * calcular medias.
+ *
+ * Importante: la fórmula NDVI (`(B08 - B04) / (B08 + B04)`) es **idéntica**
+ * en process y statistics. La única diferencia es el output: process pinta
+ * con paleta para visualizar; statistics emite el float crudo para que
+ * Sentinel agregue estadísticas (mean, stDev, etc.).
  */
-const NDVI_EVALSCRIPT = `//VERSION=3
+const NDVI_PROCESS_EVALSCRIPT = `//VERSION=3
 function setup() {
   return {
     input: ["B04", "B08", "dataMask"],
@@ -78,10 +83,145 @@ function evaluatePixel(sample) {
   return                [0.10, 0.55, 0.10, 1];  // vegetación vigorosa
 }`;
 
+/**
+ * Umbral NDVI por debajo del cual se considera que el píxel está en
+ * "estrés" (suelo desnudo, cultivo seco, agua, sombras, etc.). Cualquier
+ * píxel con `NDVI > HEALTH_SCORE_NDVI_THRESHOLD` cuenta como "saludable"
+ * para el cálculo del `healthScore` del lote.
+ *
+ * 0.3 es el corte agronómico convencional entre "suelo descubierto/estrés"
+ * y "cobertura vegetal incipiente". Cambios en este valor recalibran todo
+ * el score: subirlo lo hace más exigente, bajarlo más permisivo. Se
+ * expone como `export const` para que tests y consumidores conozcan el
+ * mismo número sin tener que parsear el evalscript.
+ */
+export const HEALTH_SCORE_NDVI_THRESHOLD = 0.5;
+
+/**
+ * Evalscript para `/api/v1/statistics`.
+ *
+ * Sentinel agrega estadísticas (`min`, `max`, `mean`, `stDev`, `sampleCount`,
+ * `noDataCount`) por banda y por intervalo de agregación. Para que la API
+ * sepa qué pixels excluir, el script DEBE emitir un output `dataMask` —
+ * Sentinel suma sus 1s y resta los 0s del `sampleCount` antes de calcular
+ * la media.
+ *
+ * Output `data`:
+ *  - `B0` = NDVI (float crudo en [-1, 1]).
+ *  - `B1` = `isHealthy` (0 o 1): vale 1 si el píxel tiene NDVI por encima
+ *    de `HEALTH_SCORE_NDVI_THRESHOLD`, 0 si no. Truco clave: Sentinel
+ *    calcula `mean(B1)` sobre los píxeles válidos (dataMask = 1), y eso
+ *    **es directamente la fracción de área saludable** del lote en ese
+ *    intervalo. `healthScore = mean(B1) * 100`. Evita pedir histogramas
+ *    y mantiene la respuesta compacta.
+ *  - `B2` = B08 (reflectancia NIR — útil para análisis futuros).
+ *  - `B3` = B04 (reflectancia Roja — útil para análisis futuros).
+ *
+ * Nota: el threshold del evalscript es un literal porque Sentinel ejecuta
+ * el script con `eval` y no podemos inyectar variables JS desde Node. Si
+ * algún día se hace dinámico habría que generar el script con template
+ * string sustituyendo el número exacto (manteniéndolo siempre en sync
+ * con `HEALTH_SCORE_NDVI_THRESHOLD`).
+ */
+const NDVI_STATISTICS_EVALSCRIPT = `//VERSION=3
+function setup() {
+  return {
+    input: [{
+      bands: ["B04", "B08", "SCL", "dataMask"]
+    }],
+    output: [
+      { id: "data", bands: 4, sampleType: "FLOAT32" },
+      { id: "scl", sampleType: "INT8", bands: 1 },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+
+function evaluatePixel(samples) {
+  const denom = samples.B08 + samples.B04;
+  const ndvi = denom === 0 ? 0 : (samples.B08 - samples.B04) / denom;
+  const isHealthy = ndvi > 0.3 ? 1 : 0;
+  return {
+    data: [ndvi, isHealthy, samples.B08, samples.B04],
+    dataMask: [samples.dataMask],
+    scl: [samples.SCL]
+  };
+}`;
+
 const DEFAULT_PROCESS_URL = 'https://services.sentinel-hub.com/api/v1/process';
+const DEFAULT_STATISTICS_URL =
+  'https://services.sentinel-hub.com/api/v1/statistics';
 const DEFAULT_WIDTH = 512;
 const DEFAULT_HEIGHT = 512;
 const DEFAULT_MAX_CLOUD_COVERAGE = 30;
+
+/** ISO 8601 duration por defecto para `aggregationInterval`. */
+const DEFAULT_AGGREGATION_INTERVAL = 'P10D';
+
+/**
+ * Punto de la serie temporal NDVI que sale del mapper.
+ *
+ *  - `fecha`: inicio del intervalo de agregación (truncado a `YYYY-MM-DD`).
+ *  - `ndvi`: media del NDVI sobre los píxeles válidos del polígono.
+ *  - `healthScore`: 0–100. Porcentaje del área medible del lote con NDVI
+ *     por encima de `HEALTH_SCORE_NDVI_THRESHOLD`. **Sale directamente de la
+ *     media de la banda `isHealthy` del evalscript** (no del `mean` NDVI),
+ *     así que penaliza correctamente lotes mosaicados (mitad sano, mitad
+ *     suelo desnudo) que un promedio NDVI maquillaría como "moderado".
+ *  - `validPixels`: `sampleCount - noDataCount`, útil para descartar puntos
+ *     donde la cobertura nubosa o el clipping dejaron muy pocas muestras
+ *     y mostrar nivel de confianza en el frontend.
+ */
+export interface NDVIStatisticsPoint {
+  fecha: string;
+  ndvi: number;
+  healthScore: number;
+  validPixels: number;
+}
+
+export interface GetNdviStatisticsOptions {
+  /**
+   * Duración ISO 8601 del intervalo de agregación (`P10D`, `P1M`, etc.).
+   * Default `P10D`. Más corto = más puntos pero más sensible a nubes.
+   */
+  aggregationInterval?: string;
+  /** % máximo de cobertura nubosa por escena. Default 30. */
+  maxCloudCoverage?: number;
+}
+
+/**
+ * Forma cruda (parcial) de la respuesta del Statistics API. Sólo
+ * declaramos lo que consumimos en `mapStatisticsResponse`; el resto
+ * existe en runtime pero lo ignoramos para no acoplarnos a campos que
+ * Sentinel podría ampliar.
+ */
+interface SentinelStatisticsBandStats {
+  min?: number;
+  max?: number;
+  mean?: number;
+  stDev?: number;
+  sampleCount?: number;
+  noDataCount?: number;
+}
+
+interface SentinelStatisticsBand {
+  stats?: SentinelStatisticsBandStats;
+}
+
+interface SentinelStatisticsOutput {
+  bands?: Record<string, SentinelStatisticsBand>;
+}
+
+interface SentinelStatisticsInterval {
+  interval?: { from?: string; to?: string };
+  outputs?: Record<string, SentinelStatisticsOutput>;
+  error?: { type?: string; message?: string };
+}
+
+interface SentinelStatisticsResponse {
+  data?: SentinelStatisticsInterval[];
+  status?: string;
+}
 
 @Injectable()
 export class SentinelService {
@@ -232,8 +372,233 @@ export class SentinelService {
           },
         ],
       },
-      evalscript: NDVI_EVALSCRIPT,
+      evalscript: NDVI_PROCESS_EVALSCRIPT,
     };
+  }
+
+  /**
+   * Pide a Sentinel Hub Statistical API una serie temporal de NDVI sobre el
+   * polígono indicado, agrupada por intervalo (`P10D` por default).
+   *
+   * Por qué `/statistics` y no agregamos en cliente:
+   *  - Statistical API resamplea, aplica `dataMask` y compone múltiples
+   *    escenas Sentinel-2 dentro del intervalo en el server. Hacer eso en
+   *    cliente requeriría descargar todas las escenas y reproyectarlas —
+   *    típicamente cientos de MB por mes para un lote chico.
+   *  - El precio en `processing units` es bajísimo comparado con `/process`
+   *    porque no se devuelve imagen, solo agregados numéricos.
+   *
+   * Diseño deliberadamente sin `bbox` en la firma: para estadísticas usamos
+   * **solo** `bounds.geometry`. El sampleCount queda restringido a los píxeles
+   * dentro del polígono real del lote (no del envelope axis-aligned), así la
+   * media NDVI refleja el lote, no las casas/calles vecinas.
+   *
+   * @returns Array ya transformado: `[{ fecha, ndvi, validPixels }]`.
+   *   Vacío si Sentinel no encontró escenas en el rango (cobertura nubosa
+   *   total, fechas muy recientes sin tile disponible, etc.). El caller debe
+   *   tratar el vacío como "sin datos en el período", no como error.
+   *
+   * @throws `InternalServerErrorException` si falta `BEARER_KEY`.
+   * @throws `BadGatewayException` si Sentinel responde 4xx/5xx.
+   * @throws `ServiceUnavailableException` si la red falla.
+   */
+  async getNDVIStatistics(
+    geometry: Polygon,
+    timeRange: TimeRange,
+    options: GetNdviStatisticsOptions = {},
+  ): Promise<NDVIStatisticsPoint[]> {
+    const bearerToken = this.getBearerTokenOrThrow();
+    const url = process.env.SENTINEL_STATISTICS_URL ?? DEFAULT_STATISTICS_URL;
+
+    const aggregationInterval =
+      options.aggregationInterval ?? DEFAULT_AGGREGATION_INTERVAL;
+    const maxCloudCoverage =
+      options.maxCloudCoverage ?? DEFAULT_MAX_CLOUD_COVERAGE;
+
+    const payload = this.buildStatisticsPayload({
+      geometry,
+      timeRange,
+      aggregationInterval,
+      maxCloudCoverage,
+    });
+
+    this.logger.log(
+      `→ Sentinel /statistics geometry=${geometry.coordinates[0]?.length ?? 0}v ` +
+        `range=${timeRange.from}..${timeRange.to} ` +
+        `aggregation=${aggregationInterval}`,
+    );
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.post<SentinelStatisticsResponse>(url, payload, {
+          headers: {
+            Authorization: `Bearer ${bearerToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        }),
+      );
+
+      const stats = this.mapStatisticsResponse(response.data);
+      this.logger.log(
+        `← Sentinel /statistics ${response.status} ${stats.length} intervalos`,
+      );
+      return stats;
+    } catch (cause) {
+      throw this.translateAxiosError(cause);
+    }
+  }
+
+  /**
+   * Arma el body para `POST /api/v1/statistics`.
+   *
+   * Diferencias clave vs. `/process`:
+   *  - `bounds` lleva **solo** `geometry` (no bbox). La grid de muestreo de
+   *    Statistical API se calcula desde la geometría; pasarle el envelope
+   *    sumaría píxeles fuera del lote al sampleCount.
+   *  - `dataFilter.timeRange` vive **dentro de `aggregation`**, no de `data`.
+   *    Es una particularidad de Statistical API distinta a Process API.
+   *  - `aggregationInterval.of: "P10D"` define la duración del bucket
+   *    temporal. El response trae un `interval` por cada cubo no vacío.
+   *  - `width`/`height` definen la grilla de muestreo del statistics; los
+   *    fijamos en 512×512 igual que `/process` para que la media se calcule
+   *    sobre la misma cantidad de samples nominales.
+   */
+  private buildStatisticsPayload(input: {
+    geometry: Polygon;
+    timeRange: TimeRange;
+    aggregationInterval: string;
+    maxCloudCoverage: number;
+  }) {
+    return {
+      input: {
+        bounds: {
+          geometry: {
+            type: input.geometry.type,
+            coordinates: input.geometry.coordinates,
+          },
+          properties: {
+            crs: 'http://www.opengis.net/def/crs/OGC/1.3/CRS84',
+          },
+        },
+        data: [
+          {
+            type: 'sentinel-2-l2a',
+            dataFilter: {
+              maxCloudCoverage: input.maxCloudCoverage,
+              mosaickingOrder: 'leastCC',
+            },
+          },
+        ],
+      },
+      aggregation: {
+        timeRange: {
+          from: this.toIsoStart(input.timeRange.from),
+          to: this.toIsoEnd(input.timeRange.to),
+        },
+        aggregationInterval: {
+          of: input.aggregationInterval,
+        },
+        width: DEFAULT_WIDTH,
+        height: DEFAULT_HEIGHT,
+        evalscript: NDVI_STATISTICS_EVALSCRIPT,
+      },
+      calculations: {
+        default: {},
+      },
+    };
+  }
+
+  /**
+   * Transforma la respuesta cruda de `/statistics` en una serie limpia y
+   * tipada que consume el frontend.
+   *
+   * Por cada intervalo del array `data`:
+   *  - Si el intervalo tiene `error` (Sentinel marca buckets sin escenas
+   *    disponibles), lo descartamos del output. Mejor un "hueco" que un
+   *    punto con NDVI inventado.
+   *  - Si `outputs.data.bands.B0.stats.mean` (NDVI) no es un número finito,
+   *    también se descarta (puede pasar con datasets totalmente enmascarados).
+   *  - `healthScore` sale de `outputs.data.bands.B1.stats.mean` (la banda
+   *    `isHealthy` del evalscript), redondeado a entero 0–100. Si no
+   *    estuviera disponible (evalscript viejo, respuesta degradada),
+   *    caemos a un fallback heurístico basado en el NDVI medio para no
+   *    romper el endpoint — pero loguemos warning porque debería estar.
+   *  - La fecha se toma de `interval.from` y se trunca a `YYYY-MM-DD`. El
+   *    frontend la usa como dataKey del eje X.
+   */
+  private mapStatisticsResponse(
+    raw: SentinelStatisticsResponse | undefined,
+  ): NDVIStatisticsPoint[] {
+    const intervals = raw?.data ?? [];
+
+    return intervals
+      .map((bucket): NDVIStatisticsPoint | null => {
+        if (bucket.error) {
+          this.logger.debug(
+            `Intervalo ${bucket.interval?.from ?? '?'} sin datos: ${bucket.error.type ?? 'unknown'}`,
+          );
+          return null;
+        }
+
+        const ndviStats = bucket.outputs?.data?.bands?.B0?.stats;
+        const ndviMean = ndviStats?.mean;
+        if (typeof ndviMean !== 'number' || !Number.isFinite(ndviMean)) {
+          return null;
+        }
+
+        const from = bucket.interval?.from;
+        if (!from) return null;
+
+        const sampleCount = ndviStats?.sampleCount ?? 0;
+        const noDataCount = ndviStats?.noDataCount ?? 0;
+        const validPixels = Math.max(0, sampleCount - noDataCount);
+
+        const healthyMean = bucket.outputs?.data?.bands?.B1?.stats?.mean;
+        const healthScore =
+          typeof healthyMean === 'number' && Number.isFinite(healthyMean)
+            ? Math.round(this.clamp01(healthyMean) * 100)
+            : this.heuristicHealthScoreFromNdvi(ndviMean);
+
+        return {
+          fecha: from.slice(0, 10),
+          ndvi: Number(ndviMean.toFixed(4)),
+          healthScore,
+          validPixels,
+        };
+      })
+      .filter((point): point is NDVIStatisticsPoint => point !== null);
+  }
+
+  /** Saneo defensivo: la `mean` de una banda binaria siempre cae en [0,1]. */
+  private clamp01(n: number): number {
+    if (n < 0) return 0;
+    if (n > 1) return 1;
+    return n;
+  }
+
+  /**
+   * Fallback heurístico cuando el evalscript no devolvió la banda
+   * `isHealthy` (despliegues viejos, scripts custom, etc.). Mapea el NDVI
+   * medio del intervalo a un score lineal usando el threshold de salud:
+   *
+   *  - NDVI ≤ threshold → 0 (todo en estrés).
+   *  - NDVI ≥ 0.8 (vegetación vigorosa) → 100.
+   *  - Entre medio, interpolación lineal.
+   *
+   * Es claramente menos preciso que `mean(isHealthy)` (penaliza menos los
+   * lotes mosaicados), pero garantiza que el endpoint siga devolviendo un
+   * score numérico aunque alguien rompa el script.
+   */
+  private heuristicHealthScoreFromNdvi(ndviMean: number): number {
+    this.logger.warn(
+      'Statistics sin banda isHealthy — usando fallback heurístico NDVI→score',
+    );
+    if (ndviMean <= HEALTH_SCORE_NDVI_THRESHOLD) return 0;
+    if (ndviMean >= 0.8) return 100;
+    const span = 0.8 - HEALTH_SCORE_NDVI_THRESHOLD;
+    const ratio = (ndviMean - HEALTH_SCORE_NDVI_THRESHOLD) / span;
+    return Math.round(ratio * 100);
   }
 
   /**

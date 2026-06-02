@@ -68,3 +68,6 @@ CLAUDE.md
 /generated
 
 /generated/prisma
+
+# Datos de incendios y archivos pesados
+/data/firms/*.csv
