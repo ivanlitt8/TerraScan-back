@@ -71,3 +71,6 @@ CLAUDE.md
 
 # Datos de incendios y archivos pesados
 /data/firms/*.csv
+
+# Secrets
+/secrets

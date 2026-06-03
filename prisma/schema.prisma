@@ -26,3 +26,54 @@ model Lote {
   userId          String
   user            User     @relation(fields: [userId], references: [id])
 }
+
+/// Detección histórica de incendio activo / fuente de calor de NASA FIRMS.
+///
+/// Fuente: archivos CSV de FIRMS (https://firms.modaps.eosdis.nasa.gov/)
+/// con datos de los sensores VIIRS a bordo de los satélites Suomi-NPP
+/// (SNPP) y NOAA-20 (N20). Cada fila representa un "fire pixel" de
+/// 375 m × 375 m detectado en una pasada del satélite.
+///
+/// Modelo agnóstico al satélite — usamos un único campo `satellite`
+/// (`"N20"` / `"SNPP"`) para distinguir el origen. Todas las columnas
+/// opcionales son `null`-able porque versiones futuras del producto
+/// pueden agregar/quitar campos sin romper la ingesta.
+///
+/// La columna `geom` es `geometry(Point, 4326)` (postgis): la **única**
+/// que se usa para queries espaciales (ST_DWithin, ST_Intersects, etc.).
+/// `latitude` y `longitude` se mantienen como columnas planas para
+/// trazabilidad y auditoría — `geom` se deriva de ellas con un UPDATE
+/// post-carga.
+///
+/// Prisma no entiende `geometry` nativamente, así que la declaramos como
+/// `Unsupported(...)`. Eso implica: no se puede leer/escribir desde el
+/// cliente Prisma típico (`prisma.incendio.findMany`) — para eso hay que
+/// usar `$queryRaw`. El cliente sí incluirá el resto de campos.
+model Incendio {
+  id         Int                                   @id @default(autoincrement())
+  latitude   Float
+  longitude  Float
+  brightness Float?
+  scan       Float?
+  track      Float?
+  acq_date   DateTime
+  acq_time   String?
+  satellite  String
+  instrument String?
+  confidence String?
+  version    String?
+  bright_t31 Float?
+  frp        Float?
+  daynight   String?
+  type       Int?
+  geom       Unsupported("geometry(Point, 4326)")?
+
+  /// Índice GIST sobre `geom`: indispensable para que `ST_DWithin` y
+  /// `ST_Intersects` rindan O(log N) en vez de full scan. Sin esto, una
+  /// query "incendios a 5 km del lote" sobre 4M filas es inviable.
+  @@index([geom], map: "idx_incendios_geom", type: Gist)
+  /// Índice B-tree estándar sobre `acq_date` para filtros temporales
+  /// (e.g. "incendios en el lote en el último año").
+  @@index([acq_date])
+  @@map("incendios")
+}
