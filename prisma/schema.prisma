@@ -16,15 +16,36 @@ model User {
 }
 
 model Lote {
-  id              String   @id @default(uuid())
+  id              String        @id @default(uuid())
   nombre          String
   areaHectareas   Float
   scoreHistorico  Int?
   poligonoGeoJSON Json
   dataProcesada   Json
-  createdAt       DateTime @default(now())
+  createdAt       DateTime      @default(now())
   userId          String
-  user            User     @relation(fields: [userId], references: [id])
+  user            User          @relation(fields: [userId], references: [id])
+  analisis        AnalisisLote?
+}
+
+/// Resultado cacheado del análisis espacial del lote contra Google Earth
+/// Engine (elevación SRTM + historial de inundaciones GFD).
+///
+/// Patrón cache-aside: se recalcula contra GEE sólo si la geometría del
+/// lote cambió (`geomHash`) o si el registro venció el TTL. Para los
+/// datasets actuales (SRTM 2000, GFD 2000–2018) el dato es esencialmente
+/// estático, así que el disparador real de recálculo es el cambio de
+/// geometría, no el tiempo — el TTL es sólo una red de seguridad.
+model AnalisisLote {
+  id                String   @id @default(uuid())
+  loteId            String   @unique
+  lote              Lote     @relation(fields: [loteId], references: [id], onDelete: Cascade)
+  elevacion         Float?
+  eventosInundacion Int      @default(0)
+  inundaciones      Json? // Detalle de eventos: [{ began, ended, duracionDias, dfoId }]
+  geomHash          String? // Para invalidación por cambio de geometría
+  fuentes           Json? // { srtm: "USGS/SRTMGL1_003", gfd: "GLOBAL_FLOOD_DB/MODIS_EVENTS/V1" }
+  updatedAt         DateTime @updatedAt
 }
 
 /// Detección histórica de incendio activo / fuente de calor de NASA FIRMS.

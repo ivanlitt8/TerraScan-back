@@ -1,12 +1,11 @@
 import {
-  BadRequestException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { Feature, Geometry } from 'geojson';
+import { toPostgisGeometryGeoJSON } from '../../common/geojson';
 import { PrismaService } from '../prisma/prisma.service';
 import { GetIncendiosQueryDto } from './dto/get-incendios.query.dto';
 import type { IncendioResponse } from './types/incendio.response';
@@ -173,9 +172,8 @@ export class IncendiosService {
     // Prisma almacena el polígono como `Json`. Los lotes creados desde
     // el front llegan como `Feature`, pero PostGIS `ST_GeomFromGeoJSON`
     // sólo acepta la geometría (`Polygon`/`MultiPolygon`), no el wrapper.
-    const poligonoGeoJSON = this.toPostgisGeometryGeoJSON(
-      lote.poligonoGeoJSON,
-    );
+    // `toPostgisGeometryGeoJSON` (en `common/geojson`) normaliza y serializa.
+    const poligonoGeoJSON = toPostgisGeometryGeoJSON(lote.poligonoGeoJSON);
 
     this.logger.log(
       `Listando incendios para lote ${loteId} (usuario ${userId})`,
@@ -209,41 +207,6 @@ export class IncendiosService {
       satelite: row.satellite,
       tipo: row.type,
     };
-  }
-
-  private toPostgisGeometryGeoJSON(value: unknown): string {
-    const candidate = this.isGeoJSONFeature(value) ? value.geometry : value;
-
-    if (!this.isGeoJSONGeometry(candidate)) {
-      throw new BadRequestException(
-        'El lote no tiene una geometría GeoJSON válida para consultar incendios.',
-      );
-    }
-
-    return JSON.stringify(candidate);
-  }
-
-  private isGeoJSONFeature(value: unknown): value is Feature<Geometry> {
-    return (
-      this.isRecord(value) &&
-      value.type === 'Feature' &&
-      this.isGeoJSONGeometry(value.geometry)
-    );
-  }
-
-  private isGeoJSONGeometry(value: unknown): value is Geometry {
-    if (!this.isRecord(value) || typeof value.type !== 'string') {
-      return false;
-    }
-
-    return (
-      (value.type === 'Polygon' || value.type === 'MultiPolygon') &&
-      Array.isArray(value.coordinates)
-    );
-  }
-
-  private isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null;
   }
 
   private resolveTimeRange(query: GetIncendiosQueryDto): {

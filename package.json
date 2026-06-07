@@ -18,9 +18,11 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "verify:sentinel": "ts-node -r tsconfig-paths/register src/scripts/verify-sentinel.ts"
+    "verify:sentinel": "ts-node -r tsconfig-paths/register src/scripts/verify-sentinel.ts",
+    "verify:gee": "ts-node -r tsconfig-paths/register src/scripts/verify-gee.ts"
   },
   "dependencies": {
+    "@google/earthengine": "^1.7.29",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
