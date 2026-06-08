@@ -1,12 +1,14 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   Res,
@@ -19,6 +21,7 @@ import { SupabaseAuthGuard } from '../../auth/guards/supabase-auth.guard';
 import type { AuthenticatedUser } from '../../auth/types/authenticated-user';
 import { AnalyzeLoteDto } from './dto/analyze-lote.dto';
 import { GetSaludQueryDto } from './dto/get-salud.query.dto';
+import { UpdateLoteDto } from './dto/update-lote.dto';
 import { LoteService } from './lote.service';
 
 /**
@@ -55,6 +58,32 @@ export class LoteController {
     @CurrentUser('id') userId: string,
   ) {
     return this.loteService.findOneForUser(id, userId);
+  }
+
+  /**
+   * `PATCH /api/lotes/:id` — renombra el lote. Devuelve el registro
+   * actualizado para que el frontend refresque su estado en el acto.
+   */
+  @Patch(':id')
+  rename(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() dto: UpdateLoteDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.loteService.rename(id, userId, dto.nombre);
+  }
+
+  /**
+   * `DELETE /api/lotes/:id` — elimina el lote y, en cascada, su análisis GEE.
+   * Responde `204 No Content` (sin body) ante éxito.
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @CurrentUser('id') userId: string,
+  ): Promise<void> {
+    await this.loteService.remove(id, userId);
   }
 
   /**
@@ -152,5 +181,26 @@ export class LoteController {
       stats,
       healthScore,
     };
+  }
+
+  /**
+   * Endpoint liviano: **solo** la serie temporal NDVI (`stats`) para el
+   * rango indicado en query (`?from=YYYY-MM-DD&to=YYYY-MM-DD`), sin PNG ni
+   * score.
+   *
+   * Lo consume el selector de período del gráfico del dashboard. La capa de
+   * mapa y el score siguen usando `salud-analisis` (ventana de 30 días);
+   * este endpoint permite estirar el gráfico a 3/6/12 meses con una sola
+   * llamada barata a la Statistical API (sin re-renderizar el raster).
+   */
+  @Get(':id/salud-stats')
+  @Header('Cache-Control', 'private, max-age=300')
+  async getSaludStats(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Query() query: GetSaludQueryDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    const stats = await this.loteService.getNDVIStats(id, userId, query);
+    return { stats };
   }
 }

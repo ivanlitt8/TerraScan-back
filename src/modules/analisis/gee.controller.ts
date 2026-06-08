@@ -1,9 +1,12 @@
 import {
   Controller,
+  DefaultValuePipe,
   Get,
   Header,
   Param,
+  ParseBoolPipe,
   ParseUUIDPipe,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
@@ -35,13 +38,18 @@ export class GeeController {
    * `Cache-Control: private, max-age=300` — coherente con el resto de
    * endpoints de lote; el dato cambia poquísimo (caché de servidor +
    * datasets estáticos), 5 min de cache cliente son seguros.
+   *
+   * Query opcional `?force=true`: ignora la caché del servidor y recalcula
+   * contra Google Earth Engine. Lo usa el botón "Actualizar datos" del panel.
    */
   @Get(':loteId')
   @Header('Cache-Control', 'private, max-age=300')
   async getAnalisis(
     @Param('loteId', new ParseUUIDPipe({ version: '4' })) loteId: string,
     @CurrentUser('id') userId: string,
+    @Query('force', new DefaultValuePipe(false), ParseBoolPipe)
+    force: boolean,
   ): Promise<AnalisisLoteResponse> {
-    return this.analisisService.getAnalisisEspacial(loteId, userId);
+    return this.analisisService.getAnalisisEspacial(loteId, userId, force);
   }
 }

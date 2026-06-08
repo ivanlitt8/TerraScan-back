@@ -58,10 +58,15 @@ export class AnalisisService {
    * @throws {ServiceUnavailableException} GEE no inicializado (503).
    * @throws {GatewayTimeoutException}  el evaluate de GEE excedió el timeout (504).
    * @throws {BadGatewayException}      GEE falló el cómputo (502).
+   *
+   * @param force  Si es `true`, ignora la caché y recalcula contra GEE
+   *               (siempre persiste el resultado fresco). Pensado para el
+   *               botón "Actualizar datos" del panel.
    */
   async getAnalisisEspacial(
     loteId: string,
     userId: string,
+    force = false,
   ): Promise<AnalisisLoteResponse> {
     const lote = await this.loteService.findOneForUser(loteId, userId);
 
@@ -72,14 +77,19 @@ export class AnalisisService {
       where: { loteId },
     });
 
-    if (cached && cached.geomHash === geomHash && this.isFresh(cached.updatedAt)) {
+    if (
+      !force &&
+      cached &&
+      cached.geomHash === geomHash &&
+      this.isFresh(cached.updatedAt)
+    ) {
       this.logger.log(`Cache HIT análisis lote ${loteId}`);
       return this.toResponse(cached, true);
     }
 
     this.logger.log(
       `Cache MISS análisis lote ${loteId} ` +
-        `(${!cached ? 'sin registro' : cached.geomHash !== geomHash ? 'geometría cambió' : 'TTL vencido'}) ` +
+        `(${force ? 'force=true' : !cached ? 'sin registro' : cached.geomHash !== geomHash ? 'geometría cambió' : 'TTL vencido'}) ` +
         `→ consultando GEE`,
     );
 

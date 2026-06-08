@@ -159,6 +159,37 @@ export class LoteService {
   }
 
   /**
+   * Renombra un lote validando ownership. Devuelve el registro actualizado
+   * (mismo shape que `analyze`) para que el frontend refresque su estado sin
+   * volver a pedir el detalle.
+   */
+  async rename(id: string, userId: string, nombre: string) {
+    await this.findOneForUser(id, userId);
+
+    const lote = await this.prisma.lote.update({
+      where: { id },
+      data: { nombre },
+    });
+
+    this.logger.log(`Lote ${id} renombrado a "${nombre}" por usuario ${userId}`);
+
+    return lote;
+  }
+
+  /**
+   * Elimina un lote validando ownership. El análisis GEE asociado
+   * (`AnalisisLote`) se borra en cascada por la FK `onDelete: Cascade`, así
+   * que no quedan registros huérfanos.
+   */
+  async remove(id: string, userId: string) {
+    await this.findOneForUser(id, userId);
+
+    await this.prisma.lote.delete({ where: { id } });
+
+    this.logger.log(`Lote ${id} eliminado por usuario ${userId}`);
+  }
+
+  /**
    * Devuelve un PNG NDVI del lote pedido para el rango temporal indicado
    * (defaults: últimos 30 días).
    *
@@ -259,6 +290,43 @@ export class LoteService {
     );
 
     return { buffer, bbox, stats, healthScore };
+  }
+
+  /**
+   * Solo la serie temporal NDVI para un rango arbitrario, **sin** generar el
+   * PNG ni recalcular el score de salud.
+   *
+   * Pensado para el selector de período del gráfico del dashboard: el score
+   * y la capa de mapa siguen anclados a la ventana "actual" (30 días) vía
+   * `getSaludAnalisis`, mientras el gráfico puede pedir 3/6/12 meses sin
+   * pagar el costo de re-renderizar el raster (que es lo caro/lento) ni
+   * mover el número que el productor interpreta como "estado de hoy".
+   */
+  async getNDVIStats(
+    id: string,
+    userId: string,
+    query: GetSaludQueryDto,
+  ): Promise<NDVIStatisticsPoint[]> {
+    const lote = await this.findOneForUser(id, userId);
+
+    const feature = lote.poligonoGeoJSON as unknown as Feature<Polygon>;
+    const timeRange = this.resolveTimeRange(query);
+
+    this.logger.log(
+      `Solicitando serie NDVI para lote ${lote.id} (usuario ${userId}) ` +
+        `range=${timeRange.from}..${timeRange.to}`,
+    );
+
+    const stats = await this.sentinel.getNDVIStatistics(
+      feature.geometry,
+      timeRange,
+    );
+
+    this.logger.log(
+      `Serie NDVI lote ${lote.id} OK: ${stats.length} puntos`,
+    );
+
+    return stats;
   }
 
   /**
