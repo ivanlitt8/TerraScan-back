@@ -106,6 +106,12 @@ export class LoteService {
     await this.ensureUserRow(user);
     const areaHectareas = this.calcularAreaHectareas(dto.poligonoGeoJSON);
 
+    // Si se pide asignar a un establecimiento, validamos que sea del usuario
+    // antes de crear (evita que el lote nazca asociado a un campo ajeno).
+    if (dto.establecimientoId) {
+      await this.assertEstablecimientoOwnership(dto.establecimientoId, user.id);
+    }
+
     const lote = await this.prisma.lote.create({
       data: {
         nombre: dto.nombre,
@@ -114,6 +120,9 @@ export class LoteService {
           dto.poligonoGeoJSON as unknown as Prisma.InputJsonValue,
         dataProcesada: {},
         user: { connect: { id: user.id } },
+        ...(dto.establecimientoId
+          ? { establecimiento: { connect: { id: dto.establecimientoId } } }
+          : {}),
       },
     });
 
@@ -124,14 +133,22 @@ export class LoteService {
     return lote;
   }
 
-  async findAllForUser(userId: string) {
+  /**
+   * Lista los lotes del usuario. Si se pasa `establecimientoId`, filtra sólo
+   * los lotes de ese establecimiento (las tarjetas de la subruta de campo).
+   */
+  async findAllForUser(userId: string, establecimientoId?: string) {
     return this.prisma.lote.findMany({
-      where: { userId },
+      where: {
+        userId,
+        ...(establecimientoId ? { establecimientoId } : {}),
+      },
       select: {
         id: true,
         nombre: true,
         areaHectareas: true,
         createdAt: true,
+        establecimientoId: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -159,21 +176,60 @@ export class LoteService {
   }
 
   /**
-   * Renombra un lote validando ownership. Devuelve el registro actualizado
-   * (mismo shape que `analyze`) para que el frontend refresque su estado sin
-   * volver a pedir el detalle.
+   * Actualiza un lote validando ownership: renombre y/o (re)asignación a un
+   * establecimiento. Devuelve el registro actualizado para que el frontend
+   * refresque su estado sin volver a pedir el detalle.
+   *
+   * Reglas:
+   *  - Sólo se modifican los campos presentes en `data` (patch parcial).
+   *  - `establecimientoId` con UUID → valida que ese establecimiento exista
+   *    y pertenezca al mismo usuario (no se puede asignar a campos ajenos).
+   *  - `establecimientoId: null` → desagrupa el lote.
    */
-  async rename(id: string, userId: string, nombre: string) {
+  async update(
+    id: string,
+    userId: string,
+    data: { nombre?: string; establecimientoId?: string | null },
+  ) {
     await this.findOneForUser(id, userId);
+
+    if (typeof data.establecimientoId === 'string') {
+      await this.assertEstablecimientoOwnership(data.establecimientoId, userId);
+    }
 
     const lote = await this.prisma.lote.update({
       where: { id },
-      data: { nombre },
+      data: {
+        ...(data.nombre !== undefined ? { nombre: data.nombre } : {}),
+        ...(data.establecimientoId !== undefined
+          ? { establecimientoId: data.establecimientoId }
+          : {}),
+      },
     });
 
-    this.logger.log(`Lote ${id} renombrado a "${nombre}" por usuario ${userId}`);
+    this.logger.log(`Lote ${id} actualizado por usuario ${userId}`);
 
     return lote;
+  }
+
+  /** Valida que un establecimiento exista y sea del usuario antes de asignarlo. */
+  private async assertEstablecimientoOwnership(
+    establecimientoId: string,
+    userId: string,
+  ): Promise<void> {
+    const establecimiento = await this.prisma.establecimiento.findUnique({
+      where: { id: establecimientoId },
+      select: { userId: true },
+    });
+
+    if (!establecimiento) {
+      throw new NotFoundException(
+        `Establecimiento ${establecimientoId} no encontrado`,
+      );
+    }
+    if (establecimiento.userId !== userId) {
+      throw new ForbiddenException('No tenés acceso a ese establecimiento.');
+    }
   }
 
   /**

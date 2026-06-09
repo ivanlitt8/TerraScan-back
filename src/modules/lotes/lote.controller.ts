@@ -48,8 +48,11 @@ export class LoteController {
   }
 
   @Get()
-  findAll(@CurrentUser('id') userId: string) {
-    return this.loteService.findAllForUser(userId);
+  findAll(
+    @CurrentUser('id') userId: string,
+    @Query('establecimientoId') establecimientoId?: string,
+  ) {
+    return this.loteService.findAllForUser(userId, establecimientoId);
   }
 
   @Get(':id')
@@ -61,16 +64,17 @@ export class LoteController {
   }
 
   /**
-   * `PATCH /api/lotes/:id` — renombra el lote. Devuelve el registro
-   * actualizado para que el frontend refresque su estado en el acto.
+   * `PATCH /api/lotes/:id` — renombra el lote y/o lo (re)asigna a un
+   * establecimiento. Devuelve el registro actualizado para que el frontend
+   * refresque su estado en el acto.
    */
   @Patch(':id')
-  rename(
+  update(
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
     @Body() dto: UpdateLoteDto,
     @CurrentUser('id') userId: string,
   ) {
-    return this.loteService.rename(id, userId, dto.nombre);
+    return this.loteService.update(id, userId, dto);
   }
 
   /**

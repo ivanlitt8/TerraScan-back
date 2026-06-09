@@ -6,6 +6,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   MinLength,
   ValidateNested,
@@ -42,4 +43,9 @@ export class AnalyzeLoteDto {
   @ValidateNested()
   @Type(() => PoligonoGeoJSONDto)
   poligonoGeoJSON!: PoligonoGeoJSONDto;
+
+  /** Establecimiento al que asignar el lote al crearlo (opcional). */
+  @IsOptional()
+  @IsUUID('4')
+  establecimientoId?: string;
 }

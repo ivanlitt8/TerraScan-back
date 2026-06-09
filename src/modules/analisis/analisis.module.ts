@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../../auth/auth.module';
 import { LoteModule } from '../lotes/lote.module';
 import { AnalisisService } from './analisis.service';
+import { DashboardController } from './dashboard.controller';
+import { DashboardService } from './dashboard.service';
 import { GeeController } from './gee.controller';
 
 /**
@@ -19,7 +21,7 @@ import { GeeController } from './gee.controller';
  */
 @Module({
   imports: [AuthModule, LoteModule],
-  controllers: [GeeController],
-  providers: [AnalisisService],
+  controllers: [GeeController, DashboardController],
+  providers: [AnalisisService, DashboardService],
 })
 export class AnalisisModule {}

@@ -9,23 +9,45 @@ datasource db {
 }
 
 model User {
-  id        String   @id
-  email     String   @unique
-  createdAt DateTime @default(now())
+  id              String            @id
+  email           String            @unique
+  createdAt       DateTime          @default(now())
+  lotes           Lote[]
+  establecimientos Establecimiento[]
+}
+
+/// Establecimiento (campo) del productor: agrupa lotes bajo una unidad de
+/// gestión. Un usuario puede tener varios establecimientos y cada
+/// establecimiento muchos lotes.
+model Establecimiento {
+  id        String   @id @default(uuid())
+  nombre    String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   lotes     Lote[]
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 model Lote {
-  id              String        @id @default(uuid())
-  nombre          String
-  areaHectareas   Float
-  scoreHistorico  Int?
-  poligonoGeoJSON Json
-  dataProcesada   Json
-  createdAt       DateTime      @default(now())
-  userId          String
-  user            User          @relation(fields: [userId], references: [id])
-  analisis        AnalisisLote?
+  id                String           @id @default(uuid())
+  nombre            String
+  areaHectareas     Float
+  scoreHistorico    Int?
+  poligonoGeoJSON   Json
+  dataProcesada     Json
+  createdAt         DateTime         @default(now())
+  userId            String
+  user              User             @relation(fields: [userId], references: [id])
+  /// Relación opcional: un lote puede no pertenecer aún a un establecimiento
+  /// (compatibilidad con lotes creados antes de la feature). `SetNull` al
+  /// borrar el establecimiento mantiene el lote pero lo desagrupa.
+  establecimientoId String?
+  establecimiento   Establecimiento? @relation(fields: [establecimientoId], references: [id], onDelete: SetNull)
+  analisis          AnalisisLote?
+
+  @@index([establecimientoId])
 }
 
 /// Resultado cacheado del análisis espacial del lote contra Google Earth
