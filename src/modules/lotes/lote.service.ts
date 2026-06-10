@@ -345,7 +345,46 @@ export class LoteService {
         `${stats.length} puntos, score=${healthScore.score} (${healthScore.categoria})`,
     );
 
+    // Persistimos el score "actual" en la entidad para que el dashboard pueda
+    // promediarlo por establecimiento sin recalcular contra Sentinel. Patrón
+    // cache-aside (igual que la caché GEE): el dato se refresca en cada análisis
+    // que dispara el usuario, sin necesidad de un job.
+    await this.persistScoreHistorico(lote.id, healthScore);
+
     return { buffer, bbox, stats, healthScore };
+  }
+
+  /**
+   * Guarda el score de salud "actual" en `Lote.scoreHistorico` (best-effort).
+   *
+   * Decisiones:
+   *  - Cuando no hay datos (`categoria === 'Sin datos'`) persistimos `null`, no
+   *    `0`: un `0` literal arrastraría hacia abajo el promedio del dashboard.
+   *    `null` se interpreta como "sin score" y queda fuera del cálculo.
+   *  - `scoreHistorico` es `Int?`, así que redondeamos el score (0–100).
+   *  - Es best-effort: un fallo al persistir NO debe tirar abajo el análisis
+   *    (el usuario igual recibe su overlay + score en la respuesta). Se loguea
+   *    como `warn` y se sigue.
+   */
+  private async persistScoreHistorico(
+    loteId: string,
+    healthScore: HealthScoreSummary,
+  ): Promise<void> {
+    const scoreHistorico =
+      healthScore.categoria === 'Sin datos'
+        ? null
+        : Math.round(healthScore.score);
+
+    try {
+      await this.prisma.lote.update({
+        where: { id: loteId },
+        data: { scoreHistorico },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo persistir scoreHistorico del lote ${loteId}: ${(error as Error).message}`,
+      );
+    }
   }
 
   /**

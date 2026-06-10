@@ -38,6 +38,21 @@ export interface MatrizRiesgoHidricoItem {
   elevacionMedia: number | null;
   /** Eventos de inundación desde `AnalisisLote.eventosInundacion`, o `0`. */
   totalEventosInundacion: number;
+  /**
+   * Establecimiento al que pertenece el lote (`Lote.establecimientoId`), o
+   * `null` si está sin agrupar. Permite al dashboard filtrar/agrupar por campo
+   * sin una segunda query.
+   */
+  establecimientoId: string | null;
+  /** Nombre del establecimiento (snapshot de la relación), o `null`. */
+  establecimientoNombre: string | null;
+  /**
+   * Score de salud histórico del lote (`Lote.scoreHistorico`), o `null` si
+   * todavía no fue calculado. Hoy puede llegar `null` para todos los lotes
+   * (no hay job que lo persista aún); el contrato queda listo para cuando lo
+   * haya, y el front lo promedia por establecimiento ignorando los `null`.
+   */
+  score: number | null;
 }
 
 /**

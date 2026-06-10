@@ -46,8 +46,35 @@ model Lote {
   establecimientoId String?
   establecimiento   Establecimiento? @relation(fields: [establecimientoId], references: [id], onDelete: SetNull)
   analisis          AnalisisLote?
+  reportes          Reporte[]
 
   @@index([establecimientoId])
+}
+
+/// Reporte PDF generado por el usuario (Centro de Descargas). El archivo
+/// binario vive en Supabase Storage (bucket privado); acá guardamos sólo la
+/// metadata + el `urlStorage` (path relativo dentro del bucket) para listarlo
+/// y servir URLs firmadas de descarga.
+///
+/// La relación con `Lote` es opcional y usa `onDelete: SetNull`: borrar un lote
+/// NO debe borrar el reporte histórico ni su PDF. Para no perder el contexto
+/// cuando el lote/establecimiento desaparece, se persiste `establecimiento`
+/// como string plano (snapshot del nombre al momento de generar el reporte).
+model Reporte {
+  id              String   @id @default(uuid())
+  nombre          String
+  establecimiento String?
+  urlStorage      String
+  userId          String
+  loteId          String?
+  lote            Lote?    @relation(fields: [loteId], references: [id], onDelete: SetNull)
+  /// Soft delete: el reporte se oculta de la vista del usuario sin borrar la
+  /// fila ni el PDF en Storage, preservando historial y trazabilidad del SaaS.
+  isDeleted       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+  @@index([loteId])
 }
 
 /// Resultado cacheado del análisis espacial del lote contra Google Earth

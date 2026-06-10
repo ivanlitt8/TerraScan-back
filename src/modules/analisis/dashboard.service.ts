@@ -29,6 +29,9 @@ type LoteConAnalisis = {
   id: string;
   nombre: string;
   areaHectareas: number;
+  scoreHistorico: number | null;
+  establecimientoId: string | null;
+  establecimiento: { nombre: string } | null;
   poligonoGeoJSON: Prisma.JsonValue;
   analisis: { elevacion: number | null; eventosInundacion: number } | null;
 };
@@ -62,6 +65,9 @@ export class DashboardService {
         id: true,
         nombre: true,
         areaHectareas: true,
+        scoreHistorico: true,
+        establecimientoId: true,
+        establecimiento: { select: { nombre: true } },
         poligonoGeoJSON: true,
         analisis: { select: { elevacion: true, eventosInundacion: true } },
       },
@@ -79,6 +85,9 @@ export class DashboardService {
       areaHectareas: lote.areaHectareas,
       elevacionMedia: lote.analisis?.elevacion ?? null,
       totalEventosInundacion: lote.analisis?.eventosInundacion ?? 0,
+      establecimientoId: lote.establecimientoId ?? null,
+      establecimientoNombre: lote.establecimiento?.nombre ?? null,
+      score: lote.scoreHistorico ?? null,
     }));
 
     const totalHectareas = Number(

@@ -8,16 +8,20 @@ import { GeeModule } from './modules/gee/gee.module';
 import { IncendiosModule } from './modules/incendios/incendios.module';
 import { LoteModule } from './modules/lotes/lote.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
+import { ReporteModule } from './modules/reportes/reporte.module';
+import { StorageModule } from './modules/storage/storage.module';
 
 @Module({
   imports: [
     PrismaModule,
+    StorageModule,
     AuthModule,
     GeeModule,
     LoteModule,
     EstablecimientoModule,
     IncendiosModule,
     AnalisisModule,
+    ReporteModule,
   ],
   controllers: [AppController],
   providers: [AppService],
