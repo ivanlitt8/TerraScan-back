@@ -114,14 +114,14 @@ export class AnalisisService {
         eventosInundacion: analisis.eventosInundacion,
         inundaciones: inundacionesJson,
         geomHash,
-        fuentes: fuentesMap as unknown as Prisma.InputJsonValue,
+        fuentes: fuentesMap,
       },
       update: {
         elevacion: analisis.elevacionMedia,
         eventosInundacion: analisis.eventosInundacion,
         inundaciones: inundacionesJson,
         geomHash,
-        fuentes: fuentesMap as unknown as Prisma.InputJsonValue,
+        fuentes: fuentesMap,
       },
     });
 
@@ -176,9 +176,7 @@ export class AnalisisService {
    * cambia el hash y forzamos recálculo.
    */
   private hashGeometry(geometry: Polygon | MultiPolygon): string {
-    return createHash('sha256')
-      .update(JSON.stringify(geometry))
-      .digest('hex');
+    return createHash('sha256').update(JSON.stringify(geometry)).digest('hex');
   }
 
   private isFresh(updatedAt: Date): boolean {

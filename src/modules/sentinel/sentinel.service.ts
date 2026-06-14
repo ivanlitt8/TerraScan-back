@@ -151,6 +151,17 @@ function evaluatePixel(samples) {
 const DEFAULT_PROCESS_URL = 'https://services.sentinel-hub.com/api/v1/process';
 const DEFAULT_STATISTICS_URL =
   'https://services.sentinel-hub.com/api/v1/statistics';
+const DEFAULT_TOKEN_URL = 'https://services.sentinel-hub.com/oauth/token';
+
+/**
+ * Margen de seguridad (ms) para renovar el token antes de su expiración real.
+ * Evita usar un token que vence "en vuelo" entre que lo leemos de cache y
+ * Sentinel lo recibe.
+ */
+const TOKEN_REFRESH_MARGIN_MS = 60_000;
+
+/** Vida por defecto del token (s) si Sentinel no devuelve `expires_in`. */
+const DEFAULT_TOKEN_TTL_SECONDS = 3600;
 const DEFAULT_WIDTH = 512;
 const DEFAULT_HEIGHT = 512;
 const DEFAULT_MAX_CLOUD_COVERAGE = 30;
@@ -223,11 +234,104 @@ interface SentinelStatisticsResponse {
   status?: string;
 }
 
+/** Respuesta del endpoint OAuth2 `client_credentials` de Sentinel Hub. */
+interface SentinelTokenResponse {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+}
+
 @Injectable()
 export class SentinelService {
   private readonly logger = new Logger(SentinelService.name);
 
+  /**
+   * Token OAuth cacheado en memoria. Se reutiliza mientras siga vigente (con
+   * el margen `TOKEN_REFRESH_MARGIN_MS`) para no pedir uno nuevo en cada
+   * llamada a Sentinel; cuando expira, `obtenerTokenSentinel()` lo renueva
+   * automáticamente.
+   */
+  private cachedToken: { value: string; expiresAt: number } | null = null;
+
   constructor(private readonly httpService: HttpService) {}
+
+  /**
+   * Obtiene un access token de Sentinel Hub vía OAuth2 (`client_credentials`).
+   *
+   * Implementa el flujo "Just-In-Time": cada llamada a Sentinel arranca
+   * pidiendo (o reutilizando de cache) un token fresco, eliminando la
+   * dependencia del viejo `BEARER_KEY` hardcodeado que expiraba cada 15 min.
+   *
+   * El body se envía `application/x-www-form-urlencoded` (`URLSearchParams`)
+   * con `grant_type`, `client_id` y `client_secret` leídos del entorno.
+   *
+   * @returns El `access_token` vigente (de cache si no expiró, o uno nuevo).
+   * @throws `InternalServerErrorException` si faltan las credenciales OAuth.
+   * @throws `BadGatewayException` / `ServiceUnavailableException` si el
+   *   endpoint OAuth falla (4xx/5xx o red).
+   */
+  async obtenerTokenSentinel(): Promise<string> {
+    // Reutilizamos el token cacheado mientras siga vigente.
+    if (
+      this.cachedToken &&
+      this.cachedToken.expiresAt - TOKEN_REFRESH_MARGIN_MS > Date.now()
+    ) {
+      return this.cachedToken.value;
+    }
+
+    const clientId = process.env.SENTINEL_CLIENT_ID;
+    const clientSecret = process.env.SENTINEL_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      this.logger.error(
+        'Faltan SENTINEL_CLIENT_ID / SENTINEL_CLIENT_SECRET — no se puede ' +
+          'autenticar contra Sentinel Hub.',
+      );
+      throw new InternalServerErrorException(
+        'Servidor mal configurado: faltan credenciales OAuth de Sentinel.',
+      );
+    }
+
+    const url = process.env.SENTINEL_TOKEN_URL ?? DEFAULT_TOKEN_URL;
+
+    const body = new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.post<SentinelTokenResponse>(url, body.toString(), {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+          },
+        }),
+      );
+
+      const token = response.data?.access_token;
+      if (!token) {
+        throw new Error('La respuesta OAuth no incluyó access_token.');
+      }
+
+      const ttlSeconds =
+        response.data.expires_in ?? DEFAULT_TOKEN_TTL_SECONDS;
+      this.cachedToken = {
+        value: token,
+        expiresAt: Date.now() + ttlSeconds * 1000,
+      };
+
+      this.logger.log(
+        `Token Sentinel OAuth renovado (válido ~${ttlSeconds}s).`,
+      );
+      return token;
+    } catch (cause) {
+      // Invalidamos cache: el próximo intento forzará una renovación limpia.
+      this.cachedToken = null;
+      throw this.translateAxiosError(cause);
+    }
+  }
 
   /**
    * Pide a Sentinel Hub Process API una imagen NDVI (PNG, RGBA) del bbox y
@@ -248,7 +352,8 @@ export class SentinelService {
    * @returns `Buffer` con el PNG ya decodificado (listo para servirlo desde
    *   un endpoint con `Content-Type: image/png`).
    *
-   * @throws `InternalServerErrorException` si falta `BEARER_KEY`.
+   * @throws `InternalServerErrorException` si faltan las credenciales OAuth
+   *   (`SENTINEL_CLIENT_ID` / `SENTINEL_CLIENT_SECRET`).
    * @throws `BadGatewayException` si Sentinel responde 4xx/5xx.
    * @throws `ServiceUnavailableException` si la red falla (timeout, DNS, etc.).
    */
@@ -258,7 +363,7 @@ export class SentinelService {
     options: GetNdviOptions = {},
     geometry?: Polygon,
   ): Promise<Buffer> {
-    const bearerToken = this.getBearerTokenOrThrow();
+    const bearerToken = await this.obtenerTokenSentinel();
     const url = process.env.SENTINEL_PROCESS_URL ?? DEFAULT_PROCESS_URL;
 
     const width = options.width ?? DEFAULT_WIDTH;
@@ -398,7 +503,8 @@ export class SentinelService {
    *   total, fechas muy recientes sin tile disponible, etc.). El caller debe
    *   tratar el vacío como "sin datos en el período", no como error.
    *
-   * @throws `InternalServerErrorException` si falta `BEARER_KEY`.
+   * @throws `InternalServerErrorException` si faltan las credenciales OAuth
+   *   (`SENTINEL_CLIENT_ID` / `SENTINEL_CLIENT_SECRET`).
    * @throws `BadGatewayException` si Sentinel responde 4xx/5xx.
    * @throws `ServiceUnavailableException` si la red falla.
    */
@@ -407,7 +513,7 @@ export class SentinelService {
     timeRange: TimeRange,
     options: GetNdviStatisticsOptions = {},
   ): Promise<NDVIStatisticsPoint[]> {
-    const bearerToken = this.getBearerTokenOrThrow();
+    const bearerToken = await this.obtenerTokenSentinel();
     const url = process.env.SENTINEL_STATISTICS_URL ?? DEFAULT_STATISTICS_URL;
 
     const aggregationInterval =
@@ -615,19 +721,6 @@ export class SentinelService {
     return /^\d{4}-\d{2}-\d{2}$/.test(input)
       ? `${input}T23:59:59Z`
       : new Date(input).toISOString();
-  }
-
-  private getBearerTokenOrThrow(): string {
-    const bearerToken = process.env.BEARER_KEY;
-    if (!bearerToken) {
-      this.logger.error(
-        'BEARER_KEY no está definido — no se puede llamar a Sentinel Hub.',
-      );
-      throw new InternalServerErrorException(
-        'Servidor mal configurado: falta credencial Sentinel.',
-      );
-    }
-    return bearerToken;
   }
 
   /**

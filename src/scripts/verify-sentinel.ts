@@ -79,11 +79,16 @@ async function main(): Promise<void> {
   console.log('▶ verify-sentinel — chequeando integración con Sentinel Hub\n');
   console.log('Configuración leída de .env.local:');
   console.log(
-    `  PLANET_API_KEY       = ${maskToken(process.env.PLANET_API_KEY)} (no se envía en Authorization)`,
+    `  PLANET_API_KEY        = ${maskToken(process.env.PLANET_API_KEY)} (no se envía en Authorization)`,
   );
-  console.log(`  BEARER_KEY           = ${maskToken(process.env.BEARER_KEY)}`);
   console.log(
-    `  SENTINEL_PROCESS_URL = ${process.env.SENTINEL_PROCESS_URL ?? '(default)'}`,
+    `  SENTINEL_CLIENT_ID    = ${maskToken(process.env.SENTINEL_CLIENT_ID)}`,
+  );
+  console.log(
+    `  SENTINEL_CLIENT_SECRET = ${maskToken(process.env.SENTINEL_CLIENT_SECRET)}`,
+  );
+  console.log(
+    `  SENTINEL_PROCESS_URL  = ${process.env.SENTINEL_PROCESS_URL ?? '(default)'}`,
   );
   console.log(`  bbox                 = [${VERIFY_BBOX.join(', ')}]`);
   console.log(
@@ -137,9 +142,10 @@ async function main(): Promise<void> {
 
     console.error(
       '\nSugerencias:\n' +
-        '  · Si el status fue 401, el `BEARER_KEY` está ausente, expirado o no corresponde a Sentinel Hub — ' +
-        'regenerar el access token y actualizar `.env.local`.\n' +
-        '  · `PLANET_API_KEY` queda reservado para pedir/renovar Bearer tokens; no se envía directo a `/process`.\n' +
+        '  · Si el status fue 401, revisá `SENTINEL_CLIENT_ID` / `SENTINEL_CLIENT_SECRET` en `.env.local`: ' +
+        'el flujo OAuth2 (client_credentials) genera el access token automáticamente, ' +
+        'pero necesita credenciales válidas del OAuth client de Sentinel Hub.\n' +
+        '  · `PLANET_API_KEY` queda reservado para Planet; no se envía a `/process`.\n' +
         '  · Si fue 4xx por timeRange, revisar que el rango caiga dentro de ' +
         'la cobertura de Sentinel-2 L2A.\n' +
         '  · Si fue 5xx, suele ser inestabilidad temporal de Sentinel — reintentar.',
