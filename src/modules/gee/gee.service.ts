@@ -178,11 +178,10 @@ export class GeeService {
    * promesa en vez de disparar una segunda autenticación (que pisaría el
    * estado global de `ee`).
    *
-   * Lee la private key desde el archivo apuntado por
-   * `GEE_SERVICE_ACCOUNT_PATH` (default `secrets/google-key.json`). Se lee
-   * en runtime con `fs` (en vez de `import`) para: a) no bundlear el
-   * secreto en `dist/`, b) permitir rotarlo sin recompilar, c) mantener la
-   * ruta configurable por entorno.
+   * Resuelve la private key con `loadPrivateKey()`: primero intenta la
+   * variable de entorno `GOOGLE_GEE_KEY` (producción) y, si no existe, cae
+   * al archivo apuntado por `GEE_SERVICE_ACCOUNT_PATH` (default
+   * `secrets/google-key.json`, desarrollo local).
    */
   async initialize(): Promise<void> {
     if (this.ready) return;
@@ -456,7 +455,27 @@ export class GeeService {
     });
   }
 
+  /**
+   * Resuelve la private key del Service Account de GEE con dos estrategias,
+   * en orden de prioridad:
+   *
+   *  1. **Variable de entorno `GOOGLE_GEE_KEY`** (producción, e.g. Render):
+   *     el JSON completo de la key viaja como string en el entorno. Evita
+   *     tener que subir un archivo de secreto al filesystem del contenedor.
+   *  2. **Archivo en disco** (desarrollo local): se lee la ruta apuntada por
+   *     `GEE_SERVICE_ACCOUNT_PATH` (default `secrets/google-key.json`). Se
+   *     lee en runtime con `fs` para no bundlear el secreto en `dist/` y
+   *     permitir rotarlo sin recompilar.
+   */
   private async loadPrivateKey(): Promise<ee.EEPrivateKey> {
+    const fromEnv = process.env.GOOGLE_GEE_KEY?.trim();
+    if (fromEnv) {
+      this.logger.log(
+        'Cargando private key de GEE desde la variable de entorno GOOGLE_GEE_KEY',
+      );
+      return this.parsePrivateKey(fromEnv, 'la variable de entorno GOOGLE_GEE_KEY');
+    }
+
     const configured =
       process.env.GEE_SERVICE_ACCOUNT_PATH ?? 'secrets/google-key.json';
     const keyPath = isAbsolute(configured)
@@ -469,23 +488,34 @@ export class GeeService {
     } catch (cause) {
       throw new Error(
         `No se pudo leer la private key de GEE en "${keyPath}". ` +
-          `Configurá GEE_SERVICE_ACCOUNT_PATH o colocá el archivo en secrets/google-key.json. ` +
+          `Definí GOOGLE_GEE_KEY (JSON completo) para producción, ` +
+          `configurá GEE_SERVICE_ACCOUNT_PATH o colocá el archivo en secrets/google-key.json. ` +
           `Causa: ${(cause as Error).message}`,
       );
     }
 
+    this.logger.log(`Cargando private key de GEE desde el archivo "${keyPath}"`);
+    return this.parsePrivateKey(raw, `el archivo "${keyPath}"`);
+  }
+
+  /**
+   * Parsea y valida el JSON de la private key, sin importar su origen
+   * (variable de entorno o archivo). `sourceDesc` se usa sólo para construir
+   * mensajes de error legibles que apunten a la fuente correcta.
+   */
+  private parsePrivateKey(raw: string, sourceDesc: string): ee.EEPrivateKey {
     let parsed: ee.EEPrivateKey;
     try {
       parsed = JSON.parse(raw) as ee.EEPrivateKey;
     } catch (cause) {
       throw new Error(
-        `La private key de GEE en "${keyPath}" no es un JSON válido: ${(cause as Error).message}`,
+        `La private key de GEE en ${sourceDesc} no es un JSON válido: ${(cause as Error).message}`,
       );
     }
 
     if (!parsed.private_key || !parsed.client_email) {
       throw new Error(
-        `La private key de GEE en "${keyPath}" no tiene "private_key" y/o "client_email".`,
+        `La private key de GEE en ${sourceDesc} no tiene "private_key" y/o "client_email".`,
       );
     }
 
