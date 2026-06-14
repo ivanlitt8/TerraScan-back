@@ -151,7 +151,8 @@ function evaluatePixel(samples) {
 const DEFAULT_PROCESS_URL = 'https://services.sentinel-hub.com/api/v1/process';
 const DEFAULT_STATISTICS_URL =
   'https://services.sentinel-hub.com/api/v1/statistics';
-const DEFAULT_TOKEN_URL = 'https://services.sentinel-hub.com/oauth/token';
+const DEFAULT_TOKEN_URL =
+  'https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token';
 
 /**
  * Margen de seguridad (ms) para renovar el token antes de su expiración real.
@@ -302,9 +303,8 @@ export class SentinelService {
 
     try {
       const response = await firstValueFrom(
-        this.httpService.post<SentinelTokenResponse>(url, body.toString(), {
+        this.httpService.post<SentinelTokenResponse>(url, body, {
           headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
             Accept: 'application/json',
           },
         }),
