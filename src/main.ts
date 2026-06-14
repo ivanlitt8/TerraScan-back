@@ -4,11 +4,20 @@ loadEnv({ path: '.env.local' });
 
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { GeeService } from './modules/gee/gee.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // Se desactiva CSP porque es una API JSON pura que no renderiza HTML
+      hsts: { maxAge: 31536000, includeSubDomains: true, preload: true }, // Fuerza conexiones HTTPS seguras por un año
+      referrerPolicy: { policy: 'no-referrer' }, // Evita filtrar la URL de origen en peticiones salientes
+    }),
+  );
 
   app.setGlobalPrefix('api');
 
