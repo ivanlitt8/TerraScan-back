@@ -48,16 +48,25 @@ async function bootstrap() {
     }),
   );
 
-  const frontendOrigin = process.env.FRONTEND_ORIGIN ?? 'http://localhost:3000';
-
+  const allowedOrigins = [
+    'http://localhost:3000',
+    'https://terrascan-platform.vercel.app'
+  ];
+  
   app.enableCors({
-    origin: frontendOrigin,
+    origin: (origin, callback) => {
+      // Si la petición no tiene origin (como Postman) o está en la lista, pasa directo
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Bloqueado por CORS de TerraScan'));
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
-    // Headers HTTP custom que el browser debe **permitir leer** desde el
+    // Headers HTTP custom que el browser debe permitir leer desde el
     // cliente JS cross-origin. Sin esta whitelist, `response.headers.get(...)`
-    // devuelve `null` aunque el server los esté enviando: la spec de CORS
-    // oculta por default cualquier header que no esté en el set "simple".
+    // devuelve `null` aunque el server los esté enviando.
     //
     // - `X-NDVI-Bbox`: bbox usado para enmarcar la imagen NDVI; el frontend
     //   lo lee desde `useNDVILayer` para posicionar el `image` source.
@@ -70,7 +79,7 @@ async function bootstrap() {
   await app.listen(port);
 
   Logger.log(
-    `Terrascan API escuchando en http://localhost:${port}/api (CORS: ${frontendOrigin})`,
+    `Terrascan API escuchando en http://localhost:${port}/api (CORS: ${allowedOrigins.join(', ')})`,
     'Bootstrap',
   );
 }
